@@ -5,10 +5,10 @@ on:
     paths-ignore:
       - "**.md"
     branches:
-      - main
+      - master
   pull_request:
     branches:
-      - main
+      - master
   workflow_dispatch:
 
 concurrency:
@@ -22,11 +22,20 @@ jobs:
   build-apk:
     name: Build APK
     runs-on: ubuntu-latest
+    outputs:
+      version_name: ${{ steps.version.outputs.version_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Set version name
+        id: version
+        run: |
+          VERSION_NAME=$(git describe --tags --always --dirty)
+          echo "Resolved version name: $VERSION_NAME"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK
         uses: actions/setup-java@v5
@@ -86,34 +95,39 @@ jobs:
           export KEYSTORE_PASS="${{ secrets.KEY_STORE_PASSWORD }}"
           export KEY_ALIAS="${{ secrets.ALIAS }}"
           export KEY_PASSWORD="${{ secrets.KEY_PASSWORD }}"
-          ./gradlew :app:assembleRelease --no-daemon
+          export VERSION_NAME="${{ steps.version.outputs.version_name }}"
+          ./gradlew :app:assembleRelease --no-daemon -PversionName="$VERSION_NAME"
 
       - name: Rename Release APK
-        run: mv app/build/outputs/apk/release/*.apk GhostLock-release.apk
+        run: mv app/build/outputs/apk/release/*.apk "GhostLock-${{ steps.version.outputs.version_name }}.apk"
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v7
         with:
-          name: GhostLock-release
-          path: GhostLock-release.apk
+          name: GhostLock-${{ steps.version.outputs.version_name }}
+          path: GhostLock-${{ steps.version.outputs.version_name }}.apk
           archive: false
 
-  post_telegram:
+  release:
+    name: Publish Release
     needs: [build-apk]
     runs-on: ubuntu-latest
-    if: ${{ success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.ref_type != 'tag' }}
+    if: ${{ success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - uses: actions/download-artifact@v8
+      - name: Download APK artifact
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
+          pattern: "GhostLock-*"
+          merge-multiple: true
 
-      - name: Post to Telegram
-        env:
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          BOT_API_LINK: ${{ secrets.BOT_API_LINK }}
-        run: bash .github/scripts/post_telegram.sh
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "${{ needs.build-apk.outputs.version_name }}-${{ github.run_number }}"
+          name: "GhostLock ${{ needs.build-apk.outputs.version_name }}-${{ github.run_number }}"
+          body: "Automated build from commit ${{ github.sha }}."
+          make_latest: true
+          files: artifacts/*.apk
